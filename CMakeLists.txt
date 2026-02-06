@@ -17,4 +17,9 @@ find_package(rclpy REQUIRED)
 #   scripts/navigation_node.py
 #   DESTINATION lib/${PROJECT_NAME})
 
+install(
+  DIRECTORY config description launch worlds
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()

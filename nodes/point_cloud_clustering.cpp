@@ -8,6 +8,11 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
 #include <Eigen/Dense>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/common/common.h> 
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <geometry_msgs/msg/point.hpp>
 
 struct DetectedPlane
 {
@@ -16,6 +21,14 @@ struct DetectedPlane
     enum Type { FLOOR, CEILING, WALL, UNKNOWN } type;
 };
 
+struct Obstacle
+{
+    Eigen::Vector3f centroid;      
+    Eigen::Vector3f min_point;     
+    Eigen::Vector3f max_point;     
+    Eigen::Vector3f dimensions;    
+    pcl::PointCloud<pcl::PointXYZ>::Ptr points;
+};
 class PointCloudClusteringNode : public rclcpp::Node 
 {
 public:
@@ -31,6 +44,9 @@ public:
             "filtered_points",
             10
         );
+        marker_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "obstacle_markers", 10
+        );
     }   
 private:
     void callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -41,13 +57,13 @@ private:
         if (cloud->empty()) return;
         auto depthfiltered = filterDepth(cloud);
         auto downsampled = downsample(depthfiltered);
-        auto planes = removeFloorPlanes(downsampled);
+        auto without_floor = removeFloorPlanes(downsampled);
+        auto obstacles = clusterObstacles(without_floor);
         
-
-        RCLCPP_INFO(this->get_logger(), ("Size: " + std::to_string(downsampled->size())+ ", Original Size: " + std::to_string(cloud->size())).c_str());
+        publishObstacleMarkers(obstacles, msg->header);
 
         sensor_msgs::msg::PointCloud2 outputmsg;
-        pcl::toROSMsg(*planes,outputmsg);
+        pcl::toROSMsg(*without_floor,outputmsg);
         outputmsg.header = msg->header;
         publisher_->publish(outputmsg);
     }
@@ -134,8 +150,98 @@ private:
         return non_floor;
     }
 
+    std::vector<Obstacle> clusterObstacles(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
+    {
+        std::vector<Obstacle> obstacles;
+
+        if (cloud->empty()) return obstacles;
+
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+        tree->setInputCloud(cloud);
+
+        std::vector<pcl::PointIndices> cluster_indices;
+        pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+        ec.setClusterTolerance(0.1); 
+        ec.setMinClusterSize(30);
+        ec.setMaxClusterSize(5000);
+        ec.setSearchMethod(tree);
+        ec.setInputCloud(cloud);
+        ec.extract(cluster_indices);
+
+        for (const auto& indices : cluster_indices)
+        {
+            Obstacle obs;
+            obs.points = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>);
+            
+            for (const auto& idx : indices.indices)
+            {
+                obs.points->push_back((*cloud)[idx]);
+            }
+
+            pcl::PointXYZ min_pt, max_pt;
+            pcl::getMinMax3D(*obs.points, min_pt, max_pt);
+            
+            obs.min_point = Eigen::Vector3f(min_pt.x, min_pt.y, min_pt.z);
+            obs.max_point = Eigen::Vector3f(max_pt.x, max_pt.y, max_pt.z);
+            
+            obs.dimensions = obs.max_point - obs.min_point;
+            
+            obs.centroid = (obs.min_point + obs.max_point) / 2.0f;
+            
+            obstacles.push_back(obs);
+            
+            RCLCPP_INFO(this->get_logger(), 
+                "Obstacle at [%.2f, %.2f, %.2f], size [%.2f x %.2f x %.2f]m",
+                obs.centroid.x(), obs.centroid.y(), obs.centroid.z(),
+                obs.dimensions.x(), obs.dimensions.y(), obs.dimensions.z());
+        }
+
+        return obstacles;
+    }
+
+    void publishObstacleMarkers(const std::vector<Obstacle>& obstacles, const std_msgs::msg::Header& header)
+    {
+        visualization_msgs::msg::MarkerArray marker_array;
+        
+        for (size_t i = 0; i < obstacles.size(); i++)
+        {
+            const auto& obs = obstacles[i];
+            
+            visualization_msgs::msg::Marker marker;
+            marker.header = header;
+            marker.ns = "obstacles";
+            marker.id = i;
+            marker.type = visualization_msgs::msg::Marker::CUBE;
+            marker.action = visualization_msgs::msg::Marker::ADD;
+            
+            // Position (center of bounding box)
+            marker.pose.position.x = obs.centroid.x();
+            marker.pose.position.y = obs.centroid.y();
+            marker.pose.position.z = obs.centroid.z();
+            marker.pose.orientation.w = 1.0;
+            
+            // Size (bounding box dimensions)
+            marker.scale.x = obs.dimensions.x();
+            marker.scale.y = obs.dimensions.y();
+            marker.scale.z = obs.dimensions.z();
+            
+            // Color (semi-transparent red)
+            marker.color.r = 1.0;
+            marker.color.g = 0.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.5;
+            
+            marker.lifetime = rclcpp::Duration::from_seconds(0.5);
+            
+            marker_array.markers.push_back(marker);
+        }
+        
+        marker_publisher_->publish(marker_array);
+    }
+
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscriber_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
 };
 
 int main(int argc, char** argv)

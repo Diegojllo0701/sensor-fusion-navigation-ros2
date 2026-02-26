@@ -21,6 +21,9 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+
 
 add_executable(point_cloud_clustering nodes/point_cloud_clustering.cpp)
 
@@ -32,6 +35,8 @@ ament_target_dependencies(point_cloud_clustering
   pcl_conversions
   tf2_ros
   tf2_geometry_msgs
+  visualization_msgs
+  geometry_msgs
 )
 
 target_link_libraries(point_cloud_clustering ${PCL_LIBRARIES})
